@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<!--
+  CHANGING ROOM - 3D dress-up, from the 13 <33 Covenant shop.
+
+  SERVE IT, do not open the file directly. This page uses ES modules, which
+  browsers refuse to load over file://:
+      python -m http.server 8000
+      http://localhost:8000/
+
+  Deliberately not styled like the AngelGotchi Builder. No grain, no scanlines,
+  no pixelation. Dark product studio, editorial type, one accent colour.
+
+  Garments are real generated geometry, not photos on planes. See cr/garment.js
+  for why the topology never cuts a hole, and cr/prints.js for how the graphic
+  is lifted off a flat-lay photograph.
+
+  Files: cr/*.js (app), wardrobe.js (the catalogue: a 13-piece demo here),
+  models/*.glb (optional prop upgrades, loaded from MODEL_DIR in cr/models.js;
+  procedural fallbacks ship for all of them).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Changing Room</title>
+<meta name="description" content="A 3D dress-up viewer: a faceless figure wearing garments built procedurally from flat product images, with sizes and colourways.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230d0d0e'/%3E%3Ctext y='24' x='16' text-anchor='middle' font-size='22' fill='%23c8ff2f'%3E%E2%9C%9F%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://unpkg.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300..800&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<!-- Shop hooks are off in this demo; see README.md to wire a cart. -->
+<style>#btnAdd, #btnWearAll, #btnCart, #btnCard, #btnCrypto { display: none !important; }</style>
+<style>
+  :root{
+    --ink:#0d0d0e;
+    --carbon:#17171a;
+    --line:#2a2a2e;
+    --bone:#e8e4dc;
+    --ash:#8a867e;
+    --acid:#c8ff2f;
+    --disp:'Bricolage Grotesque', system-ui, -apple-system, sans-serif;
+    --mono:'JetBrains Mono', ui-monospace, monospace;
+  }
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  html,body{ height:100%; }
+  /* iOS: kill double-tap-to-zoom. Tapping the nav arrows quickly to cycle
+     garments was registering as a double-tap and zooming the page instead.
+     The viewport user-scalable=no above does NOT do this on its own - iOS
+     Safari has ignored it since iOS 10. touch-action:manipulation is what
+     actually drops the ~300ms double-tap wait. Same fix as the Angelgotchi
+     Builder. #gl keeps touch-action:none for orbit (id beats `body *`). */
+  html{ -webkit-text-size-adjust:100%; }
+  body *{ touch-action:manipulation; }
+  body{
+    background:var(--ink); color:var(--bone);
+    font-family:var(--disp);
+    -webkit-font-smoothing:antialiased;
+    overflow:hidden;
+  }
+  button,select,a{ font-family:inherit; color:inherit; }
+  button{ background:none; border:0; cursor:pointer; }
+
+  #app{
+    display:grid; height:100dvh;
+    grid-template-columns:250px minmax(0,1fr) 320px;
+    grid-template-rows:auto minmax(0,1fr) auto;
+    grid-template-areas:"head head head" "rail stage rec" "foot foot foot";
+  }
+
+  /* ---------- head ---------- */
+  #head{
+    grid-area:head; display:flex; align-items:baseline; gap:22px;
+    padding:20px 26px 16px; border-bottom:1px solid var(--line);
+  }
+  #head h1{
+    font-size:19px; font-weight:700; letter-spacing:-0.02em;
+  }
+  #head .back{
+    font-family:var(--mono); font-size:10px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--ash); text-decoration:none;
+  }
+  #head .back:hover{ color:var(--acid); }
+  #head .spacer{ flex:1; }
+  #head .tot{ font-family:var(--mono); font-size:11px; letter-spacing:.1em; color:var(--ash); }
+  #head .tot b{ color:var(--acid); font-weight:500; }
+
+  /* ---------- rail ---------- */
+  #rail{
+    grid-area:rail; border-right:1px solid var(--line);
+    padding:18px 0; overflow-y:auto;
+  }
+  .slot{
+    display:block; width:100%; text-align:left;
+    padding:11px 26px; border-left:2px solid transparent;
+    transition:background .14s, border-color .14s;
+  }
+  .slot:hover{ background:var(--carbon); }
+  .slot.on{ border-left-color:var(--acid); background:var(--carbon); }
+  .slot-k{
+    display:block; font-family:var(--mono); font-size:10px;
+    letter-spacing:.16em; text-transform:uppercase; color:var(--ash);
+  }
+  .slot.on .slot-k{ color:var(--acid); }
+  .slot-v{
+    display:block; font-size:13px; margin-top:3px; color:var(--ash);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .slot.filled .slot-v{ color:var(--bone); }
+
+  /* ---------- stage ---------- */
+  #stage{ grid-area:stage; position:relative; min-height:0; }
+  #gl{ position:absolute; inset:0; width:100%; height:100%; display:block; touch-action:none; cursor:grab; }
+  #gl:active{ cursor:grabbing; }
+  .nav{
+    position:absolute; top:50%; transform:translateY(-50%); z-index:4;
+    width:40px; height:40px; border:1px solid var(--line); border-radius:50%;
+    color:var(--ash); font-size:15px; line-height:1;
+    display:flex; align-items:center; justify-content:center;
+    transition:border-color .14s, color .14s;
+  }
+  .nav:hover{ border-color:var(--acid); color:var(--acid); }
+  #prev{ left:20px; } #next{ right:20px; }
+  #counter{
+    position:absolute; left:50%; bottom:18px; transform:translateX(-50%);
+    font-family:var(--mono); font-size:10px; letter-spacing:.18em; color:var(--ash);
+  }
+  #slotLabel{
+    position:absolute; left:24px; top:20px;
+    font-family:var(--mono); font-size:10px; letter-spacing:.18em;
+    text-transform:uppercase; color:var(--ash);
+  }
+  #hint{
+    position:absolute; right:24px; top:20px;
+    font-family:var(--mono); font-size:9px; letter-spacing:.12em; color:#5a5850;
+  }
+
+  /* ---------- record ---------- */
+  #rec{
+    grid-area:rec; border-left:1px solid var(--line);
+    padding:22px 26px; overflow-y:auto;
+    display:flex; flex-direction:column; gap:18px;
+  }
+  #recName{ font-size:24px; font-weight:600; line-height:1.15; letter-spacing:-0.02em; }
+  .priceline{ display:flex; align-items:baseline; gap:6px; }
+  .priceline .cur{ font-family:var(--mono); font-size:12px; color:var(--ash); }
+  #recPrice{ font-family:var(--mono); font-size:26px; color:var(--acid); font-weight:500; }
+  #recMeta{ font-family:var(--mono); font-size:9px; letter-spacing:.08em; color:#5a5850; word-break:break-all; }
+  .lbl{
+    font-family:var(--mono); font-size:9px; letter-spacing:.18em;
+    text-transform:uppercase; color:var(--ash); margin-bottom:8px;
+  }
+  .row{ border-top:1px solid var(--line); padding-top:16px; }
+  #swatches{ display:flex; flex-wrap:wrap; gap:6px; }
+  #bodyPick{ display:flex; gap:6px; }
+  #bodyPick .sw{ flex:1; text-align:center; }
+  #bodyPick.busy{ opacity:.5; pointer-events:none; }
+  .sw{
+    font-family:var(--mono); font-size:10px; letter-spacing:.04em;
+    padding:5px 9px; border:1px solid var(--line); color:var(--ash);
+    transition:border-color .14s, color .14s;
+  }
+  .sw:hover{ border-color:var(--ash); color:var(--bone); }
+  .sw.on{ border-color:var(--acid); color:var(--acid); }
+  #sizeSel{
+    width:100%; background:var(--carbon); border:1px solid var(--line);
+    color:var(--bone); font-family:var(--mono); font-size:11px; padding:9px 10px;
+  }
+  #sizeSel.need{ border-color:var(--acid); }
+  /* colour is required the same way a size is - see colourMissing() in main.js */
+  #swatches.need .sw{ border-color:var(--acid); }
+  .btn{
+    display:block; width:100%; text-align:center; text-decoration:none;
+    font-family:var(--mono); font-size:10px; letter-spacing:.14em;
+    text-transform:uppercase; padding:11px; border:1px solid var(--line);
+    color:var(--bone); transition:border-color .14s, color .14s, background .14s;
+  }
+  .btn:hover{ border-color:var(--bone); }
+  .btn.primary{ background:var(--acid); color:#0d0d0e; border-color:var(--acid); font-weight:500; }
+  .btn.primary:hover{ filter:brightness(1.08); }
+  .btn.ghost{ color:var(--ash); }
+  .btnrow{ display:flex; gap:8px; }
+  .btnrow .btn{ flex:1; }
+  #actions{ display:flex; flex-direction:column; gap:8px; }
+
+  /* ---------- foot ---------- */
+  #foot{
+    grid-area:foot; display:flex; align-items:center; gap:4px;
+    padding:12px 26px; border-top:1px solid var(--line);
+  }
+  .fbtn{
+    font-family:var(--mono); font-size:10px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--ash); padding:8px 12px;
+    transition:color .14s;
+  }
+  .fbtn:hover{ color:var(--acid); }
+  /* The one action in the footer that is a real conversion step, so it reads as
+     a button rather than another quiet text link like Reset/Random/Photo. */
+  .fbtn.cta{
+    background:var(--acid); color:#0d0d0e; font-weight:600;
+    padding:10px 18px; border-radius:2px;
+  }
+  .fbtn.cta:hover{ color:#0d0d0e; filter:brightness(1.12); }
+  #foot .spacer{ flex:1; }
+
+  #toast{
+    position:fixed; left:50%; bottom:74px; transform:translate(-50%, 10px);
+    background:var(--acid); color:#0d0d0e; font-family:var(--mono);
+    font-size:11px; letter-spacing:.06em; padding:10px 18px;
+    opacity:0; pointer-events:none; transition:opacity .2s, transform .2s; z-index:60;
+  }
+  #toast.on{ opacity:1; transform:translate(-50%, 0); }
+
+  [hidden]{ display:none !important; }
+
+  @media (max-width:1180px){
+    #app{ grid-template-columns:210px minmax(0,1fr) 280px; }
+  }
+  @media (max-width:900px){
+    body{ overflow:auto; }
+    #app{
+      height:auto; min-height:100dvh;
+      grid-template-columns:1fr;
+      grid-template-rows:auto auto auto auto auto;
+      grid-template-areas:"head" "stage" "rail" "rec" "foot";
+    }
+    #stage{ height:74vw; min-height:340px; }
+    #rail{ border-right:0; border-bottom:1px solid var(--line); display:flex; overflow-x:auto; padding:0; }
+    .slot{ flex:0 0 auto; width:auto; border-left:0; border-bottom:2px solid transparent; padding:12px 18px; }
+    .slot.on{ border-left:0; border-bottom-color:var(--acid); }
+    #rec{ border-left:0; }
+    #foot{ flex-wrap:wrap; }
+  }
+</style>
+</head>
+<body>
+
+<div id="app">
+
+  <header id="head">
+    <a class="back" href="https://1333covenant.com/changingroom/">&#8592; 13 &lt;33</a>
+    <h1>Changing Room</h1>
+    <span class="spacer"></span>
+    <span class="tot"><span id="totalCount">0 pieces</span> &nbsp; <b id="total">0.00</b></span>
+  </header>
+
+  <nav id="rail"></nav>
+
+  <div id="stage">
+    <canvas id="gl"></canvas>
+    <div id="slotLabel">Top</div>
+    <div id="hint">Drag to spin</div>
+    <button class="nav" id="prev" aria-label="Previous">&#8592;</button>
+    <button class="nav" id="next" aria-label="Next">&#8594;</button>
+    <div id="counter">0 / 0</div>
+  </div>
+
+  <aside id="rec">
+    <div>
+      <div id="recName">Nothing on</div>
+      <div class="priceline"><span class="cur">USD</span><span id="recPrice"></span></div>
+      <div id="recMeta"></div>
+    </div>
+
+    <div class="row" id="colourRow" hidden>
+      <div class="lbl">Colourway</div>
+      <div id="swatches"></div>
+    </div>
+
+    <div class="row" id="sizeRow" hidden>
+      <div class="lbl">Size</div>
+      <select id="sizeSel"></select>
+    </div>
+
+    <div class="row" id="actions" hidden>
+      <button class="btn primary" id="btnAdd">Add to cart</button>
+      <div class="btnrow">
+        <a class="btn" id="btnCard" target="_blank" rel="noopener">Card</a>
+        <a class="btn" id="btnCrypto" target="_blank" rel="noopener">Crypto</a>
+      </div>
+      <button class="btn ghost" id="btnRemove">Take it off</button>
+    </div>
+  </aside>
+
+  <footer id="foot">
+    <button class="fbtn" id="btnReset">Reset</button>
+    <button class="fbtn" id="btnRandom">Random</button>
+    <button class="fbtn" id="btnPhoto">Photo</button>
+    <button class="fbtn" id="btnShare">Share</button>
+    <span class="spacer"></span>
+    <button class="fbtn cta" id="btnWearAll">All outfit to cart</button>
+    <button class="fbtn" id="btnCart">Cart <span class="cart-badge"></span></button>
+  </footer>
+
+</div>
+
+<div id="toast"></div>
+
+<script src="wardrobe.js?v=4"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.185.1/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.185.1/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="./cr/main.js?v=30"></script>
+<script>
+/* iOS pinch-zoom: Safari fires these instead of standard touch events, and they
+   bypass touch-action entirely. Must be passive:false or preventDefault is a
+   no-op. Same fix as the Angelgotchi Builder. */
+["gesturestart","gesturechange","gestureend"].forEach(function(ev){document.addEventListener(ev,function(e){e.preventDefault();},{passive:false});});
+</script>
+</body>
+</html>
